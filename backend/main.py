@@ -36,6 +36,10 @@ class LogEventRequest(BaseModel):
     timestamp: str
     confidence: Optional[float] = None
 
+class CollectDataRequest(BaseModel):
+    label: str
+    csv_row: str # Comma-separated landmark coordinates
+
 QUESTIONS = [
     Question(id=1, text="What is the primary purpose of an activation function in a neural network?", options=["To introduce non-linearity", "To normalize data", "To speed up training", "To initialize weights"], correct_option=0, description="Activation functions allow neural networks to learn complex patterns by introducing non-linear transformations."),
     Question(id=2, text="Which optimization algorithm is a variant of Stochastic Gradient Descent that uses adaptive learning rates?", options=["RMSprop", "Adam", "Adagrad", "All of the above"], correct_option=3, description="Adam, RMSprop, and Adagrad are all adaptive learning rate optimization algorithms."),
@@ -143,6 +147,24 @@ async def log_event(request: LogEventRequest, db: Session = Depends(database.get
     db.add(db_event)
     db.commit()
     return {"status": "success", "message": "Event logged"}
+
+@app.post("/collect-data")
+async def collect_training_data(request: CollectDataRequest):
+    import os
+    file_path = "training/proctoring_dataset.csv"
+    os.makedirs("training", exist_ok=True)
+    
+    # Check if file exists to add header
+    file_exists = os.path.isfile(file_path)
+    
+    with open(file_path, "a") as f:
+        if not file_exists:
+            # Generate header: label, x0, y0, z0, x1, y1, z1 ...
+            headers = ["label"] + [f"{coord}{i}" for i in range(468) for coord in ("x", "y", "z")]
+            f.write(",".join(headers) + "\n")
+        f.write(f"{request.label},{request.csv_row}\n")
+    
+    return {"status": "success", "message": "Data point collected"}
 
 if __name__ == "__main__":
     import uvicorn
