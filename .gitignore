@@ -1,0 +1,25 @@
+# Next.js / Vite / React
+node_modules/
+dist/
+build/
+.next/
+
+# Python / Virtualenv
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+auth.db
+exam.db
+exam_database.db
+*.csv
+
+# Environment Variables
+.env
+.env.local
+.env.production
+.env.development
+
+# OS Files
+.DS_Store
+Thumbs.db
