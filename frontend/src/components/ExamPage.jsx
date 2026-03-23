@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
-import * as FaceMeshLib from '@mediapipe/face_mesh'
+
+// We use dynamic imports and Fallbacks for MediaPipe to support both local and cloud environments
+let GlobalFaceMesh = null;
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -42,16 +44,12 @@ const ExamPage = ({ studentId }) => {
         LOOKING_AWAY: 3,
         GAZE_AWAY: 2
     }
-    const THRESHOLD = 30 // Auto-submit if penalties exceed 30
-
 
     useEffect(() => {
         const logExamEvent = (type) => {
-            // Apply penalty locally
             if (PENALTIES[type]) {
                 setPenaltyScore(prev => prev + PENALTIES[type])
             }
-
             axios.post(`${API_BASE_URL}/log-event`, {
                 student_id: studentId,
                 event_type: type,
@@ -60,72 +58,7 @@ const ExamPage = ({ studentId }) => {
             }).catch(err => console.error("Error logging event:", err));
         };
 
-        const loadQuestions = () => {
-             setIsLoading(true);
-             axios.get(`${API_BASE_URL}/questions`)
-                .then(res => {
-                    setQuestions(res.data);
-                    setIsLoading(false);
-                    setLoadError(false);
-                })
-                .catch(err => {
-                    console.error("Error fetching questions:", err);
-                    setLoadError(true);
-                    setIsLoading(false);
-                    // Use fallback if server is totally unreachable
-                    if (questions.length === 0) setQuestions(FALLBACK_QUESTIONS);
-                });
-        };
-
-        loadQuestions();
-
-        const timeout = setTimeout(() => {
-            if (isLoading && questions.length === 0) {
-                setLoadError(true);
-                setIsLoading(false);
-                setQuestions(FALLBACK_QUESTIONS);
-            }
-        }, 12000); // 12s timeout for Render wake-up
-
-        navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
-            .then(stream => {
-                streamRef.current = stream
-                if (videoRef.current) {
-                    videoRef.current.srcObject = stream
-                }
-            })
-            .catch(err => {
-                console.error("Webcam access denied:", err)
-                setPermissionDenied(true)
-            })
-
-        let faceMesh;
-        try {
-            // Robust MediaPipe initialization for both local and production environments
-            const FaceMeshConstructor = FaceMeshLib.FaceMesh || FaceMeshLib.default.FaceMesh || FaceMeshLib.default;
-            faceMesh = new FaceMeshConstructor({
-                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
-            });
-        } catch (initErr) {
-            console.error("Critical FaceMesh Init Error:", initErr);
-            setLoadError(true);
-            return;
-        }
-
-        faceMesh.setOptions({
-            maxNumFaces: 2,
-            refineLandmarks: true,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5
-        });
-
-        const lastLogTimeRef = {
-            NO_FACE: 0,
-            MULTIPLE_FACES: 0,
-            LOOKING_AWAY: 0,
-            GAZE_AWAY: 0
-        };
-
+        const lastLogTimeRef = { NO_FACE: 0, MULTIPLE_FACES: 0, LOOKING_AWAY: 0, GAZE_AWAY: 0 };
         const throttledLog = (type) => {
             const now = Date.now();
             if (now - lastLogTimeRef[type] > 5000) {
@@ -136,28 +69,22 @@ const ExamPage = ({ studentId }) => {
 
         const gazeStartRef = { time: null, direction: null };
 
-        faceMesh.onResults((results) => {
+        const onResults = (results) => {
             if (canvasRef.current && videoRef.current) {
                 const canvas = canvasRef.current;
                 const ctx = canvas.getContext('2d');
-                
-                // Set canvas internal dimensions once to match stream
                 if (canvas.width !== videoRef.current.videoWidth) {
                     canvas.width = videoRef.current.videoWidth || 640;
                     canvas.height = videoRef.current.videoHeight || 480;
                 }
-
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
 
                 if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-                    // Draw face mesh
                     ctx.fillStyle = "#00FF00";
                     results.multiFaceLandmarks.forEach(landmarks => {
                         landmarks.forEach(landmark => {
-                            const x = landmark.x * canvas.width;
-                            const y = landmark.y * canvas.height;
                             ctx.beginPath();
-                            ctx.arc(x, y, 1.5, 0, 2 * Math.PI); // Solid circles for better visibility
+                            ctx.arc(landmark.x * canvas.width, landmark.y * canvas.height, 1.5, 0, 2 * Math.PI);
                             ctx.fill();
                         });
                     });
@@ -166,37 +93,14 @@ const ExamPage = ({ studentId }) => {
 
             if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
                 const landmarks = results.multiFaceLandmarks[0];
-
-                // 1. Head Pose (Yaw) Estimation
-                const nose = landmarks[1];
-                const leftEyeOuter = landmarks[33];
-                const rightEyeOuter = landmarks[263];
-                const leftDist = Math.abs(nose.x - leftEyeOuter.x);
-                const rightDist = Math.abs(nose.x - rightEyeOuter.x);
-                const yaw = (leftDist / rightDist - 1) * 100;
-
-                // 2. Gaze Detection (Iris Tracking)
-                const leftIris = landmarks[468];
-                const leftInner = landmarks[133];
-                const rightIris = landmarks[473];
-                const rightInner = landmarks[362];
-
-                const leftEyeWidth = Math.abs(leftEyeOuter.x - leftInner.x);
-                const leftIrisPos = Math.abs(leftIris.x - leftInner.x) / leftEyeWidth;
-
-                const rightEyeWidth = Math.abs(rightEyeOuter.x - rightInner.x);
-                const rightIrisPos = Math.abs(rightIris.x - rightInner.x) / rightEyeWidth;
+                const yaw = (Math.abs(landmarks[1].x - landmarks[33].x) / Math.abs(landmarks[1].x - landmarks[263].x) - 1) * 100;
+                const leftIrisPos = Math.abs(landmarks[468].x - landmarks[133].x) / Math.abs(landmarks[33].x - landmarks[133].x);
+                const rightIrisPos = Math.abs(landmarks[473].x - landmarks[362].x) / Math.abs(landmarks[263].x - landmarks[362].x);
 
                 let currentGazeDirection = "CENTER";
-                if (leftIrisPos > sensitivity.gaze && rightIrisPos < (1 - sensitivity.gaze)) {
-                    currentGazeDirection = "LEFT";
-                }
-                // If left iris is near inner AND right is near outer -> looking subject's right
-                else if (leftIrisPos < (1 - sensitivity.gaze) && rightIrisPos > sensitivity.gaze) {
-                    currentGazeDirection = "RIGHT";
-                }
+                if (leftIrisPos > sensitivity.gaze && rightIrisPos < (1 - sensitivity.gaze)) currentGazeDirection = "LEFT";
+                else if (leftIrisPos < (1 - sensitivity.gaze) && rightIrisPos > sensitivity.gaze) currentGazeDirection = "RIGHT";
 
-                // 3. Sustained Gaze Logic (Dynamic Sensitivity)
                 let isGazeAway = false;
                 if (currentGazeDirection !== "CENTER") {
                     if (gazeStartRef.direction !== currentGazeDirection) {
@@ -211,12 +115,10 @@ const ExamPage = ({ studentId }) => {
                     gazeStartRef.direction = null;
                 }
 
-                // 4. Combined Suspicious Pattern (Head + Gaze)
                 let isHeadAway = false;
                 if (Math.abs(yaw) > sensitivity.yaw) { 
-                    if (!lookAwayStartRef.current) {
-                        lookAwayStartRef.current = Date.now();
-                    } else if (Date.now() - lookAwayStartRef.current > sensitivity.time) {
+                    if (!lookAwayStartRef.current) lookAwayStartRef.current = Date.now();
+                    else if (Date.now() - lookAwayStartRef.current > sensitivity.time) {
                         isHeadAway = true;
                         throttledLog("LOOKING_AWAY");
                     }
@@ -224,117 +126,116 @@ const ExamPage = ({ studentId }) => {
                     lookAwayStartRef.current = null;
                 }
 
-                // Visual Status Update
                 if (results.multiFaceLandmarks.length > 1) {
                     setProctoringStatus({ type: "MULTIPLE_FACES", count: results.multiFaceLandmarks.length });
                     throttledLog("MULTIPLE_FACES");
-                } else if (isHeadAway) {
-                    setProctoringStatus({ type: "LOOKING_AWAY", count: 1 });
-                } else if (isGazeAway) {
-                    setProctoringStatus({ type: "GAZE_AWAY", count: 1 });
-                } else {
-                    setProctoringStatus({ type: null, count: 0 });
-                }
+                } else if (isHeadAway) setProctoringStatus({ type: "LOOKING_AWAY", count: 1 });
+                else if (isGazeAway) setProctoringStatus({ type: "GAZE_AWAY", count: 1 });
+                else setProctoringStatus({ type: null, count: 0 });
 
             } else {
                 setProctoringStatus({ type: "NO_FACE", count: 0 });
                 throttledLog("NO_FACE");
             }
-        });
-
-        faceMeshRef.current = faceMesh;
-
-        const processVideo = async () => {
-            if (videoRef.current && videoRef.current.readyState >= 2) {
-                await faceMeshRef.current.send({ image: videoRef.current });
-            }
-            requestRef.current = requestAnimationFrame(processVideo);
         };
-        requestRef.current = requestAnimationFrame(processVideo);
+
+        const initProcess = async () => {
+            // 1. Get Questions
+            axios.get(`${API_BASE_URL}/questions`)
+                .then(res => { setQuestions(res.data); setIsLoading(false); })
+                .catch(() => setQuestions(FALLBACK_QUESTIONS));
+
+            // 2. Camera
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+                streamRef.current = stream;
+                if (videoRef.current) videoRef.current.srcObject = stream;
+            } catch (err) { setPermissionDenied(true); }
+
+            // 3. AI Engine Fallback loading
+            try {
+                if (window.FaceMesh) {
+                    GlobalFaceMesh = window.FaceMesh;
+                } else {
+                    const script = document.createElement('script');
+                    script.src = "https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js";
+                    document.head.appendChild(script);
+                    await new Promise(r => script.onload = r);
+                    GlobalFaceMesh = window.FaceMesh;
+                }
+
+                if (!GlobalFaceMesh) throw new Error("AI Engine Failed");
+
+                faceMeshRef.current = new GlobalFaceMesh({
+                    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+                });
+                faceMeshRef.current.setOptions({ maxNumFaces: 2, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+                faceMeshRef.current.onResults(onResults);
+
+                const processVideo = async () => {
+                   if (videoRef.current && videoRef.current.readyState >= 2 && faceMeshRef.current) {
+                       await faceMeshRef.current.send({ image: videoRef.current });
+                   }
+                   requestRef.current = requestAnimationFrame(processVideo);
+                };
+                requestRef.current = requestAnimationFrame(processVideo);
+            } catch (err) { console.error(err); setLoadError(true); }
+        };
+
+        initProcess();
 
         const interval = setInterval(() => {
             setTimer(prev => {
-                if (prev <= 1) {
-                    clearInterval(interval)
-                    handleSubmit()
-                    return 0
-                }
-                return prev - 1
-            })
-        }, 1000)
+                if (prev <= 1) { clearInterval(interval); handleSubmit(); return 0; }
+                return prev - 1;
+            });
+        }, 1000);
 
         return () => {
-            clearInterval(interval)
-            cancelAnimationFrame(requestRef.current)
-            if (streamRef.current) {
-                streamRef.current.getTracks().forEach(track => track.stop())
-            }
-            if (faceMeshRef.current) {
-                faceMeshRef.current.close();
-            }
-        }
-    }, [])
+            clearInterval(interval);
+            cancelAnimationFrame(requestRef.current);
+            if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+            if (faceMeshRef.current) faceMeshRef.current.close();
+        };
+    }, []);
 
     const handleOptionSelect = (optionIndex) => {
-        if (results) return
-        setAnswers({
-            ...answers,
-            [questions[currentQuestionIndex].id]: optionIndex
-        })
-    }
-
+        if (results) return;
+        setAnswers({ ...answers, [questions[currentQuestionIndex].id]: optionIndex });
+    };
 
     const handleSubmit = (flagged = false) => {
-        if (results) return
+        if (results) return;
         axios.post(`${API_BASE_URL}/submit`, {
             student_id: studentId,
             answers: answers,
-            is_flagged: flagged
-        })
-            .then(res => {
-                setResults(res.data)
-                cancelAnimationFrame(requestRef.current)
-                if (streamRef.current) {
-                    streamRef.current.getTracks().forEach(track => track.stop())
-                }
-            })
-            .catch(err => console.error('Error submitting exam:', err))
-    }
+            is_flagged: flagged || penaltyScore >= sensitivity.threshold
+        }).then(res => setResults(res.data)).catch(err => console.error(err));
+    };
 
     useEffect(() => {
         if (penaltyScore >= sensitivity.threshold && !isFlagged) {
-            setIsFlagged(true)
-            handleSubmit(true)
+            setIsFlagged(true);
+            handleSubmit(true);
         }
-    }, [penaltyScore, sensitivity.threshold])
-
-    if (permissionDenied) {
-        return (
-            <div className="container" style={{ padding: '6rem 0', textAlign: 'center' }}>
-                <div className="glass glass-card" style={{ maxWidth: '600px', margin: '0 auto', border: '1px solid #ff4757' }}>
-                    <h1 style={{ color: '#ff4757', background: 'none', WebkitTextFillColor: '#ff4757' }}>Access Blocked</h1>
-                    <p>Webcam permission is required for AI proctoring.</p>
-                    <button className="btn" onClick={() => window.location.reload()} style={{ marginTop: '2rem' }}>Grant & Retry</button>
-                </div>
-            </div>
-        )
-    }
+    }, [penaltyScore]);
 
     if (results) {
         return (
-            <div className="container" style={{ padding: '4rem 0' }}>
-                <div className="glass glass-card results-view" style={{ textAlign: 'left', maxWidth: '900px', margin: '0 auto' }}>
-                    <h1 style={{ textAlign: 'center' }}>Session Summary</h1>
-                    <div className="glass" style={{
-                        textAlign: 'center',
-                        padding: '2rem',
-                        background: results.is_flagged ? 'rgba(255, 71, 87, 0.1)' : 'rgba(79, 172, 254, 0.1)',
-                        borderRadius: '16px',
-                        marginBottom: '3rem',
-                        border: results.is_flagged ? '1px solid #ff4757' : '1px solid var(--secondary)'
-                    }}>
-                        {results.is_flagged && <h2 style={{ color: '#ff4757', background: 'none', WebkitTextFillColor: '#ff4757', marginBottom: '0.5rem' }}>⚠️ ACADEMIC INTEGRITY VIOLATION</h2>}
-                        <h2 style={{ margin: 0, background: 'none', WebkitTextFillColor: 'white' }}>Score: {results.score} / {results.total}</h2>
+            <div className="container" style={{ padding: '6rem 0' }}>
+                <div className="glass glass-card results-container" style={{ padding: '4rem', animation: 'fadeIn 0.8s ease-out' }}>
+                    <div style={{ textAlign: 'center', marginBottom: '4rem' }}>
+                        <h2 className="gradient-text" style={{ fontSize: '3.5rem', marginBottom: '1rem' }}>Exam Performance Analysis</h2>
+                        <div className={`status-badge ${results.is_flagged ? 'flagged' : 'success'}`} style={{ display: 'inline-block', padding: '0.8rem 2.5rem', borderRadius: '50px', fontWeight: '800', fontSize: '1.1rem', textTransform: 'uppercase', letterSpacing: '2px' }}>
+                            {results.is_flagged ? "DISQUALIFIED: INTEGRITY BREACH" : "Valid Session Completed"}
+                        </div>
+                    </div>
+
+                    <div className="score-overview glass" style={{ padding: '3rem', borderRadius: '24px', textAlign: 'center', marginBottom: '4rem', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--glass-border)' }}>
+                        <div className="score-circle" style={{ width: '180px', height: '180px', borderRadius: '50%', border: '8px solid var(--accent)', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', margin: '0 auto 2rem', boxShadow: '0 0 50px rgba(79, 172, 254, 0.3)' }}>
+                            <span style={{ fontSize: '3.5rem', fontWeight: '900', color: 'var(--accent)' }}>{results.score}</span>
+                            <span style={{ fontSize: '1rem', opacity: 0.6 }}>OF {results.total}</span>
+                        </div>
                         <span className="metric-label" style={{ marginTop: '1rem', display: 'block' }}>
                             {results.is_flagged ? "Flagged: Violation Threshold Exceeded" : `${Math.round((results.score / results.total) * 100)}% Proficiency Achieved`}
                         </span>
@@ -346,35 +247,14 @@ const ExamPage = ({ studentId }) => {
                                 <h4 style={{ margin: '0 0 1rem', fontSize: '1.1rem' }}>{index + 1}. {res.text}</h4>
                                 <ul className="options-list">
                                     {res.options.map((opt, optIdx) => {
-                                        let style = { 
-                                            padding: '0.8rem 1rem', 
-                                            borderRadius: '8px', 
-                                            marginBottom: '0.5rem', 
-                                            background: 'rgba(255,255,255,0.03)',
-                                            border: '1px solid var(--glass-border)',
-                                            opacity: 0.8
-                                        }
+                                        let style = { padding: '0.8rem 1rem', borderRadius: '8px', marginBottom: '0.5rem', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--glass-border)', opacity: 0.8 }
                                         let label = ""
-                                        if (optIdx === res.correct_option) {
-                                            style.borderColor = '#2ed573'
-                                            style.background = 'rgba(46, 213, 115, 0.1)'
-                                            label = " ✅"
-                                        }
+                                        if (optIdx === res.correct_option) { style.borderColor = '#2ed573'; style.background = 'rgba(46, 213, 115, 0.1)'; label = " ✅"; }
                                         if (optIdx === res.user_choice) {
-                                            if (!res.is_correct) {
-                                                style.borderColor = '#ff4757'
-                                                style.background = 'rgba(255, 71, 87, 0.1)'
-                                                label = " ❌ (Your Choice)"
-                                            } else {
-                                                label = " ✅ (Your Choice)"
-                                            }
+                                            if (!res.is_correct) { style.borderColor = '#ff4757'; style.background = 'rgba(255, 71, 87, 0.1)'; label = " ❌ (Your Choice)"; }
+                                            else label = " ✅ (Your Choice)";
                                         }
-
-                                        return (
-                                            <li key={optIdx} style={style}>
-                                                {opt} {label}
-                                            </li>
-                                        )
+                                        return <li key={optIdx} style={style}>{opt} {label}</li>
                                     })}
                                 </ul>
                                 <div className="description" style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(79, 172, 254, 0.1)', borderRadius: '12px', borderLeft: '4px solid var(--secondary)', fontSize: '0.9rem' }}>
@@ -408,13 +288,8 @@ const ExamPage = ({ studentId }) => {
             <div className="container" style={{ padding: '10rem 0', textAlign: 'center' }}>
                 <div className="glass glass-card" style={{ padding: '4rem', border: '1px solid #ff4757' }}>
                     <h2 style={{ color: '#ff4757' }}>⚠️ Cloud Connection Delayed</h2>
-                    <p style={{ opacity: 0.8, marginBottom: '2rem' }}>Your Render Backend is taking too long to respond or has not been configured in Vercel.</p>
-                    <button className="btn" onClick={() => window.location.reload()} style={{ background: 'var(--secondary)', color: 'white' }}>
-                        Retry Connection
-                    </button>
-                    <div style={{ marginTop: '2rem', fontSize: '0.8rem', opacity: 0.5 }}>
-                        Check your Vercel Environment Variable: VITE_API_URL
-                    </div>
+                    <p style={{ opacity: 0.8, marginBottom: '2rem' }}>Your AI engine or backend is taking too long to respond.</p>
+                    <button className="btn" onClick={() => window.location.reload()} style={{ background: 'var(--secondary)', color: 'white' }}>Retry Connection</button>
                 </div>
             </div>
         )
@@ -429,108 +304,37 @@ const ExamPage = ({ studentId }) => {
 
     return (
         <div className="container exam-container">
-            {/* PROCTORING SYSTEM OVERLAY */}
             {proctoringStatus.type && (
-                <div className="glass" style={{
-                    position: 'fixed',
-                    top: '30px',
-                    left: '50%',
-                    transform: 'translateX(-50%)',
-                    background: 'rgba(255, 71, 87, 0.9)',
-                    color: 'white',
-                    padding: '1rem 3rem',
-                    borderRadius: '50px',
-                    zIndex: 2000,
-                    fontWeight: '800',
-                    fontSize: '1.2rem',
-                    boxShadow: '0 0 40px rgba(255, 71, 87, 0.6)',
-                    animation: 'pulse 1.5s infinite',
-                    textAlign: 'center'
-                }}>
-                    ⚠️ {proctoringStatus.type === "NO_FACE" ? "SESSION PAUSED: NO FACE DETECTED" :
-                        proctoringStatus.type === "MULTIPLE_FACES" ? "SECURITY ALERT: MULTIPLE FACES DETECTED" :
-                            "WARNING: LOOK AT THE SCREEN"}
+                <div className="glass" style={{ position: 'fixed', top: '30px', left: '50%', transform: 'translateX(-50%)', background: 'rgba(255, 71, 87, 0.9)', color: 'white', padding: '1rem 3rem', borderRadius: '50px', zIndex: 2000, fontWeight: '800', fontSize: '1.2rem', boxShadow: '0 0 40px rgba(255, 71, 87, 0.6)', animation: 'pulse 1.5s infinite', textAlign: 'center' }}>
+                    ⚠️ {proctoringStatus.type === "NO_FACE" ? "SESSION PAUSED: NO FACE DETECTED" : proctoringStatus.type === "MULTIPLE_FACES" ? "SECURITY ALERT: MULTIPLE FACES DETECTED" : "WARNING: LOOK AT THE SCREEN"}
                     <div style={{ fontSize: '0.8rem', opacity: 0.8 }}>INTEGRITY VIOLATION DETECTED</div>
                 </div>
             )}
 
             <div className="glass" style={{ display: 'flex', justifyContent: 'space-between', padding: '1.5rem 2rem', alignItems: 'center', marginBottom: '3rem' }}>
                 <div className="timer-box">TIME LEFT: {formatTime(timer)}</div>
-                
-                {/* SENSITIVITY CONTROLS PANEL */}
-                <div className="glass" style={{ 
-                    padding: '1rem', 
-                    borderRadius: '12px', 
-                    fontSize: '0.8rem', 
-                    textAlign: 'left',
-                    minWidth: '250px'
-                }}>
+                <div className="glass" style={{ padding: '1rem', borderRadius: '12px', fontSize: '0.8rem', textAlign: 'left', minWidth: '250px' }}>
                     <strong style={{ color: 'var(--secondary)', display: 'block', marginBottom: '0.5rem' }}>AI Sensitivity Tuning</strong>
-                    
-                    <div style={{ marginBottom: '0.5rem' }}>
-                        Yaw (Head Range): {sensitivity.yaw}°
-                        <input 
-                            type="range" min="10" max="60" 
-                            value={sensitivity.yaw} 
-                            onChange={(e) => setSensitivity({...sensitivity, yaw: Number(e.target.value)})}
-                            style={{ width: '100%' }}
-                        />
-                    </div>
-                    
-                    <div style={{ marginBottom: '0.5rem' }}>
-                        Iris Detection: {Math.round(sensitivity.gaze * 100)}%
-                        <input 
-                            type="range" min="0.4" max="0.8" step="0.05"
-                            value={sensitivity.gaze} 
-                            onChange={(e) => setSensitivity({...sensitivity, gaze: Number(e.target.value)})}
-                            style={{ width: '100%' }}
-                        />
-                    </div>
-
-                    <div>
-                        Violation Time: {sensitivity.time}ms
-                        <input 
-                            type="range" min="500" max="5000" step="500"
-                            value={sensitivity.time} 
-                            onChange={(e) => setSensitivity({...sensitivity, time: Number(e.target.value)})}
-                            style={{ width: '100%' }}
-                        />
-                    </div>
+                    <div style={{ marginBottom: '0.5rem' }}>Yaw: {sensitivity.yaw}° <input type="range" min="10" max="60" value={sensitivity.yaw} onChange={(e) => setSensitivity({...sensitivity, yaw: Number(e.target.value)})} style={{ width: '100%' }} /></div>
+                    <div style={{ marginBottom: '0.5rem' }}>Iris: {Math.round(sensitivity.gaze * 100)}% <input type="range" min="0.4" max="0.8" step="0.05" value={sensitivity.gaze} onChange={(e) => setSensitivity({...sensitivity, gaze: Number(e.target.value)})} style={{ width: '100%' }} /></div>
+                    <div>Wait: {sensitivity.time}ms <input type="range" min="500" max="5000" step="500" value={sensitivity.time} onChange={(e) => setSensitivity({...sensitivity, time: Number(e.target.value)})} style={{ width: '100%' }} /></div>
                 </div>
-
                 <div style={{ textAlign: 'right' }}>
                     <div style={{ fontSize: '0.8rem', opacity: 0.7, textTransform: 'uppercase' }}>Integrity Penalty</div>
-                    <div style={{ color: penaltyScore > (sensitivity.threshold / 2) ? '#ff4757' : '#ffa502', fontWeight: '800', fontSize: '1.2rem' }}>
-                        {penaltyScore} / {sensitivity.threshold}
-                    </div>
+                    <div style={{ color: penaltyScore > (sensitivity.threshold / 2) ? '#ff4757' : '#ffa502', fontWeight: '800', fontSize: '1.2rem' }}>{penaltyScore} / {sensitivity.threshold}</div>
                 </div>
             </div>
 
             <div className="glass glass-card question-card">
                 <div className="feature-tag">Question {currentQuestionIndex + 1} of {questions.length}</div>
-                <h3 style={{ WebkitTextFillColor: 'white', background: 'none', marginBottom: '2rem' }}>{currentQuestion.text}</h3>
-                
+                <h3 style={{ WebkitTextFillColor: 'white', background: 'none', marginBottom: '2rem' }}>{currentQuestion?.text}</h3>
                 <div className="options-list">
-                    {currentQuestion.options.map((option, index) => (
-                        <div
-                            key={index}
-                            className={`option-item ${answers[currentQuestion.id] === index ? 'selected' : ''}`}
-                            onClick={() => handleOptionSelect(index)}
-                        >
-                            {option}
-                        </div>
+                    {currentQuestion?.options.map((option, index) => (
+                        <div key={index} className={`option-item ${answers[currentQuestion.id] === index ? 'selected' : ''}`} onClick={() => handleOptionSelect(index)}>{option}</div>
                     ))}
                 </div>
-
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '3rem' }}>
-                    <button
-                        className="btn"
-                        style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--glass-border)' }}
-                        disabled={currentQuestionIndex === 0}
-                        onClick={() => setCurrentQuestionIndex(prev => prev - 1)}
-                    >
-                        Previous
-                    </button>
+                    <button className="btn" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--glass-border)' }} disabled={currentQuestionIndex === 0} onClick={() => setCurrentQuestionIndex(prev => prev - 1)}>Previous</button>
                     {currentQuestionIndex === questions.length - 1 ? (
                         <button className="btn" onClick={() => handleSubmit(false)} style={{ background: 'var(--accent)', color: 'black' }}>Submit Exam</button>
                     ) : (
@@ -539,7 +343,6 @@ const ExamPage = ({ studentId }) => {
                 </div>
             </div>
 
-            {/* WEBCAM PIP */}
             <div className="webcam-container">
                 <video ref={videoRef} autoPlay muted playsInline />
                 <canvas ref={canvasRef} />
