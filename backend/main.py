@@ -11,6 +11,14 @@ load_dotenv()
 
 app = FastAPI()
 
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "message": "PROCTOR AI Backend is Live",
+        "version": "2.0.0-demo"
+    }
+
 # Enable CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
