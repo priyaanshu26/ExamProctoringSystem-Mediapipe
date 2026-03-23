@@ -1,11 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
-import { FaceMesh } from '@mediapipe/face_mesh'
+import * as FaceMeshLib from '@mediapipe/face_mesh'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
+const FALLBACK_QUESTIONS = [
+    { id: 999, text: "Wait! The Cloud Server is still waking up...", options: ["I will wait (Click to Retry)", "Check your Render Dashboard", "Check Vercel ENV settings", "Run locally instead"], correct_option: 0, description: "Render free-tier servers sleep after 15 mins of inactivity. They take ~30s to wake up on the first request." }
+];
+
 const ExamPage = ({ studentId }) => {
     const [questions, setQuestions] = useState([])
+    const [isLoading, setIsLoading] = useState(true)
+    const [loadError, setLoadError] = useState(false)
     const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
     const [answers, setAnswers] = useState({})
     const [timer, setTimer] = useState(1800)
@@ -54,9 +60,32 @@ const ExamPage = ({ studentId }) => {
             }).catch(err => console.error("Error logging event:", err));
         };
 
-        axios.get(`${API_BASE_URL}/questions`)
-            .then(res => setQuestions(res.data))
-            .catch(err => console.error("Error fetching questions:", err))
+        const loadQuestions = () => {
+             setIsLoading(true);
+             axios.get(`${API_BASE_URL}/questions`)
+                .then(res => {
+                    setQuestions(res.data);
+                    setIsLoading(false);
+                    setLoadError(false);
+                })
+                .catch(err => {
+                    console.error("Error fetching questions:", err);
+                    setLoadError(true);
+                    setIsLoading(false);
+                    // Use fallback if server is totally unreachable
+                    if (questions.length === 0) setQuestions(FALLBACK_QUESTIONS);
+                });
+        };
+
+        loadQuestions();
+
+        const timeout = setTimeout(() => {
+            if (isLoading && questions.length === 0) {
+                setLoadError(true);
+                setIsLoading(false);
+                setQuestions(FALLBACK_QUESTIONS);
+            }
+        }, 12000); // 12s timeout for Render wake-up
 
         navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
             .then(stream => {
@@ -70,9 +99,18 @@ const ExamPage = ({ studentId }) => {
                 setPermissionDenied(true)
             })
 
-        const faceMesh = new FaceMesh({
-            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
-        });
+        let faceMesh;
+        try {
+            // Robust MediaPipe initialization for both local and production environments
+            const FaceMeshConstructor = FaceMeshLib.FaceMesh || FaceMeshLib.default.FaceMesh || FaceMeshLib.default;
+            faceMesh = new FaceMeshConstructor({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+            });
+        } catch (initErr) {
+            console.error("Critical FaceMesh Init Error:", initErr);
+            setLoadError(true);
+            return;
+        }
 
         faceMesh.setOptions({
             maxNumFaces: 2,
@@ -353,7 +391,34 @@ const ExamPage = ({ studentId }) => {
         )
     }
 
-    if (questions.length === 0) return <div className="container" style={{ padding: '10rem 0', textAlign: 'center' }}><h3>Initializing Secured Environment...</h3></div>
+    if (isLoading && questions.length === 0) {
+        return (
+            <div className="container" style={{ padding: '10rem 0', textAlign: 'center' }}>
+                <div className="glass glass-card" style={{ padding: '4rem' }}>
+                    <div className="loader" style={{ marginBottom: '2rem' }}></div>
+                    <h2 style={{ color: 'var(--secondary)' }}>Establishing Secure Connection...</h2>
+                    <p style={{ opacity: 0.7 }}>The AI Cloud Engine is waking up (This may take 30-40 seconds on first run).</p>
+                </div>
+            </div>
+        )
+    }
+
+    if (loadError && questions[0]?.id === 999) {
+        return (
+            <div className="container" style={{ padding: '10rem 0', textAlign: 'center' }}>
+                <div className="glass glass-card" style={{ padding: '4rem', border: '1px solid #ff4757' }}>
+                    <h2 style={{ color: '#ff4757' }}>⚠️ Cloud Connection Delayed</h2>
+                    <p style={{ opacity: 0.8, marginBottom: '2rem' }}>Your Render Backend is taking too long to respond or has not been configured in Vercel.</p>
+                    <button className="btn" onClick={() => window.location.reload()} style={{ background: 'var(--secondary)', color: 'white' }}>
+                        Retry Connection
+                    </button>
+                    <div style={{ marginTop: '2rem', fontSize: '0.8rem', opacity: 0.5 }}>
+                        Check your Vercel Environment Variable: VITE_API_URL
+                    </div>
+                </div>
+            </div>
+        )
+    }
 
     const currentQuestion = questions[currentQuestionIndex]
     const formatTime = (seconds) => {
