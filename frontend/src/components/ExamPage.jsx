@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import { FaceMesh } from '@mediapipe/face_mesh'
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
 const ExamPage = ({ studentId }) => {
     const [questions, setQuestions] = useState([])
     const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
@@ -44,7 +46,7 @@ const ExamPage = ({ studentId }) => {
                 setPenaltyScore(prev => prev + PENALTIES[type])
             }
 
-            axios.post('http://localhost:8000/log-event', {
+            axios.post(`${API_BASE_URL}/log-event`, {
                 student_id: studentId,
                 event_type: type,
                 timestamp: new Date().toISOString(),
@@ -52,7 +54,7 @@ const ExamPage = ({ studentId }) => {
             }).catch(err => console.error("Error logging event:", err));
         };
 
-        axios.get('http://localhost:8000/questions')
+        axios.get(`${API_BASE_URL}/questions`)
             .then(res => setQuestions(res.data))
             .catch(err => console.error("Error fetching questions:", err))
 
@@ -246,7 +248,7 @@ const ExamPage = ({ studentId }) => {
 
     const handleSubmit = (flagged = false) => {
         if (results) return
-        axios.post('http://localhost:8000/submit', {
+        axios.post(`${API_BASE_URL}/submit`, {
             student_id: studentId,
             answers: answers,
             is_flagged: flagged

@@ -1,13 +1,13 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 import random
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-import models, database
+import os
+from dotenv import load_dotenv
 
-# Create tables
-models.Base.metadata.create_all(bind=database.engine)
+# Load demo environment variables
+load_dotenv()
 
 app = FastAPI()
 
@@ -65,17 +65,11 @@ QUESTIONS = [
 ]
 
 @app.post("/login")
-async def login(request: LoginRequest, db: Session = Depends(database.get_db)):
+async def login(request: LoginRequest):
     if not request.student_id:
         raise HTTPException(status_code=400, detail="Student ID required")
-    
-    student = db.query(models.Student).filter(models.Student.student_id == request.student_id).first()
-    if not student:
-        student = models.Student(student_id=request.student_id)
-        db.add(student)
-        db.commit()
-    
-    return {"message": "Login successful", "student_id": request.student_id}
+    # DEMO MODE: No database storage
+    return {"message": "Demo Login successful", "student_id": request.student_id}
 
 @app.get("/questions", response_model=List[Question])
 async def get_questions():
@@ -84,24 +78,16 @@ async def get_questions():
     return random_questions
 
 @app.post("/submit")
-async def submit_exam(request: dict, db: Session = Depends(database.get_db)):
+async def submit_exam(request: dict):
     student_id = request.get("student_id")
     user_answers = request.get("answers", {})
     is_flagged = request.get("is_flagged", False)
     
-    if not student_id:
-        raise HTTPException(status_code=400, detail="Student ID required for submission")
-
-    submission = models.Submission(student_id=student_id, answers=user_answers, is_flagged=is_flagged)
-    db.add(submission)
-    db.commit()
-
-    # Calculate results
+    # Calculate results directly without DB
     detailed_results = []
     score = 0
     
     if is_flagged:
-        # If flagged, score is 0 and we return early or just set it to 0
         message = "Exam FLAGGED due to proctoring violations. Score forced to 0."
         score = 0
     else:
@@ -137,35 +123,30 @@ async def submit_exam(request: dict, db: Session = Depends(database.get_db)):
     }
 
 @app.post("/log-event")
-async def log_event(request: LogEventRequest, db: Session = Depends(database.get_db)):
-    db_event = models.ExamEvent(
-        student_id=request.student_id,
-        event_type=request.event_type,
-        timestamp=request.timestamp,
-        confidence=request.confidence
-    )
-    db.add(db_event)
-    db.commit()
-    return {"status": "success", "message": "Event logged"}
+async def log_event(request: LogEventRequest):
+    # DEMO MODE: Just print to terminal instead of saving to DB
+    print(f"📡 AI EVENT: {request.event_type} for STU: {request.student_id}")
+    return {"status": "success", "message": "Demo Event received"}
 
 @app.post("/collect-data")
-async def collect_training_data(request: CollectDataRequest):
-    import os
-    file_path = "training/proctoring_dataset.csv"
+async def collect_data(request: CollectDataRequest):
+    # Keep CSV collection as it's useful for training even in demo mode
     os.makedirs("training", exist_ok=True)
+    filename = "training/proctoring_dataset.csv"
     
-    # Check if file exists to add header
-    file_exists = os.path.isfile(file_path)
-    
-    with open(file_path, "a") as f:
-        if not file_exists:
-            # Generate header: label, x0, y0, z0, x1, y1, z1 ...
-            headers = ["label"] + [f"{coord}{i}" for i in range(468) for coord in ("x", "y", "z")]
-            f.write(",".join(headers) + "\n")
-        f.write(f"{request.label},{request.csv_row}\n")
-    
-    return {"status": "success", "message": "Data point collected"}
+    # Write header if file doesn't exist
+    if not os.path.exists(filename):
+        with open(filename, "w") as f:
+            headers = ",".join([f"p{i}_{c}" for i in range(468) for c in ['x', 'y', 'z']]) + ",label\n"
+            f.write(headers)
+            
+    with open(filename, "a") as f:
+        f.write(f"{request.csv_row},{request.label}\n")
+        
+    return {"status": "success", "message": "Data collected for training"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host=host, port=port)
